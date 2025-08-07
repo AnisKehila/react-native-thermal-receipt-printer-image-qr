@@ -150,66 +150,97 @@ public class BLEPrinterAdapter implements PrinterAdapter{
         return;
     }
 
-    private void connectBluetoothDevice(BluetoothDevice device, Boolean retry) throws IOException {
-        UUID uuid = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
+  // 2. Fix the connectBluetoothDevice method - the retry case wasn't connecting
+private void connectBluetoothDevice(BluetoothDevice device, Boolean retry) throws IOException {
+    UUID uuid = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
 
-        if (retry) {
-            try {
-                this.mBluetoothSocket = (BluetoothSocket) device.getClass()
-                        .getMethod("createRfcommSocket", new Class[] { int.class }).invoke(device, 1);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        } else {
-            this.mBluetoothSocket = device.createInsecureRfcommSocketToServiceRecord(uuid);
+    if (retry) {
+        try {
+            this.mBluetoothSocket = (BluetoothSocket) device.getClass()
+                    .getMethod("createRfcommSocket", new Class[] { int.class }).invoke(device, 1);
+            // MISSING: Actually connect the socket!
             this.mBluetoothSocket.connect();
-        }
-
-        this.mBluetoothDevice = device;// 最后一步执行
-
-    }
-
-    @Override
-    public void closeConnectionIfExists() {
-        try{
-            if(this.mBluetoothSocket != null){
-                this.mBluetoothSocket.close();
-                this.mBluetoothSocket = null;
-            }
-        }catch(IOException e){
+        } catch (Exception e) {
             e.printStackTrace();
+            throw new IOException("Failed to connect using reflection method", e);
         }
-
-        if(this.mBluetoothDevice != null) {
-            this.mBluetoothDevice = null;
-        }
+    } else {
+        this.mBluetoothSocket = device.createInsecureRfcommSocketToServiceRecord(uuid);
+        this.mBluetoothSocket.connect();
     }
 
+    this.mBluetoothDevice = device;
+}
+
     @Override
-    public void printRawData(String rawBase64Data, Callback errorCallback) {
-        if(this.mBluetoothSocket == null){
+public synchronized void closeConnectionIfExists() {
+    try{
+        if(this.mBluetoothSocket != null){
+            this.mBluetoothSocket.close();
+            this.mBluetoothSocket = null;
+        }
+    }catch(IOException e){
+        Log.e(LOG_TAG, "Error closing socket: " + e.getMessage());
+        e.printStackTrace();
+    }
+
+    if(this.mBluetoothDevice != null) {
+        this.mBluetoothDevice = null;
+    }
+}
+
+
+
+   // 1. Fix the printRawData method with proper synchronization and validation
+@Override
+public void printRawData(String rawBase64Data, Callback errorCallback) {
+    // Synchronize access to prevent race conditions
+    synchronized(this) {
+        if(this.mBluetoothSocket == null || !this.mBluetoothSocket.isConnected()){
             errorCallback.invoke("bluetooth connection is not built, may be you forgot to connectPrinter");
             return;
         }
+        
         final String rawData = rawBase64Data;
         final BluetoothSocket socket = this.mBluetoothSocket;
         Log.v(LOG_TAG, "start to print raw data " + rawBase64Data);
+        
         new Thread(new Runnable() {
             @Override
             public void run() {
-                byte [] bytes = Base64.decode(rawData, Base64.DEFAULT);
-                try{
-                    OutputStream printerOutputStream = socket.getOutputStream();
-                    printerOutputStream.write(bytes, 0, bytes.length);
-                    printerOutputStream.flush();
-                }catch (IOException e){
-                    Log.e(LOG_TAG, "failed to print data" + rawData);
-                    e.printStackTrace();
+                byte[] bytes = Base64.decode(rawData, Base64.DEFAULT);
+                OutputStream printerOutputStream = null;
+                
+                // Double-check the connection in the thread
+                synchronized(BLEPrinterAdapter.this) {
+                    if(socket == null || !socket.isConnected()) {
+                        Log.e(LOG_TAG, "Socket disconnected during printing");
+                        return;
+                    }
+                    
+                    try {
+                        printerOutputStream = socket.getOutputStream();
+                    } catch (IOException e) {
+                        Log.e(LOG_TAG, "Failed to get output stream: " + e.getMessage());
+                        return;
+                    }
                 }
-
+                
+                // Now safely write the data
+                if(printerOutputStream != null) {
+                    try {
+                        printerOutputStream.write(bytes, 0, bytes.length);
+                        printerOutputStream.flush();
+                        Log.v(LOG_TAG, "Successfully printed raw data");
+                    } catch (IOException e) {
+                        Log.e(LOG_TAG, "Failed to print data: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }
             }
         }).start();
     }
+}
 
     public static Bitmap getBitmapFromURL(String src) {
         try {
