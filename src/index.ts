@@ -42,6 +42,7 @@ export interface IUSBPrinter {
 export interface IBLEPrinter {
   device_name: string;
   inner_mac_address: string;
+  uuids?: string[];
 }
 
 export interface INetPrinter {
